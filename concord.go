@@ -103,6 +103,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer conn.Close()
 
 	if proxy != nil {
 		switch req.URL.Scheme {
@@ -167,17 +168,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 				return http.ReadResponse(bufio.NewReader(tlsConn), req)
 			}
-
 			return connectRes, nil
 		}
-
 	}
 
 	if err := req.Write(conn); err != nil {
 		return nil, err
 	}
 	return http.ReadResponse(bufio.NewReader(conn), req)
-
 }
 
 // Apply default configurations if none are supplied
