@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -108,25 +109,29 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		switch req.URL.Scheme {
 		case "http":
 			if err := req.WriteProxy(conn); err != nil {
+				conn.Close()
 				return nil, err
 			}
 			res, err := http.ReadResponse(bufio.NewReader(conn), req)
 			if err != nil {
+				conn.Close()
 				return nil, err
 			}
 			if res.StatusCode == http.StatusProxyAuthRequired && t.ProxyAuthorizer != nil {
 				// Rewind the request body, the handshaker needs it.
 				if req.GetBody != nil {
 					if req.Body, err = req.GetBody(); err != nil {
+						conn.Close()
 						return nil, err
 					}
 				}
 				res, err = t.ProxyAuthorizer.Handshake(res, req, conn)
 				if err != nil {
+					conn.Close()
 					return nil, err
 				}
 			}
-			return res, nil
+			return wrapConnBody(conn, res)
 		case "https":
 			targetAddr := canonicalAddress(req.URL)
 			hdr := make(http.Header)
@@ -138,20 +143,24 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				Header: hdr,
 			}
 			if err := connectReq.Write(conn); err != nil {
+				conn.Close()
 				return nil, err
 			}
 			connectRes, err := http.ReadResponse(bufio.NewReader(conn), req)
 			if err != nil {
+				conn.Close()
 				return nil, err
 			}
 			if connectRes.StatusCode == http.StatusProxyAuthRequired && t.ProxyAuthorizer != nil {
 				connectRes, err = t.ProxyAuthorizer.Handshake(connectRes, connectReq, conn)
 				if err != nil {
+					conn.Close()
 					return nil, err
 				}
 			}
 			if connectRes.StatusCode == http.StatusOK {
 				if err := connectRes.Body.Close(); err != nil {
+					conn.Close()
 					return nil, err
 				}
 				tlsConfig := t.TLSClientConfig.Clone()
@@ -160,21 +169,34 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 				tlsConn, err := t.addTLS(conn, tlsConfig)
 				if err != nil {
+					conn.Close()
 					return nil, err
 				}
 				if err := req.Write(tlsConn); err != nil {
+					tlsConn.Close()
 					return nil, err
 				}
-				return http.ReadResponse(bufio.NewReader(tlsConn), req)
+				res, err := http.ReadResponse(bufio.NewReader(tlsConn), req)
+				if err != nil {
+					tlsConn.Close()
+					return nil, err
+				}
+				return wrapConnBody(tlsConn, res)
 			}
 			return connectRes, nil
 		}
 	}
 
 	if err := req.Write(conn); err != nil {
+		conn.Close()
 		return nil, err
 	}
-	return http.ReadResponse(bufio.NewReader(conn), req)
+	res, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return wrapConnBody(conn, res)
 }
 
 // Apply default configurations if none are supplied
@@ -228,4 +250,23 @@ func canonicalAddress(url *url.URL) string {
 		port = defaultPorts[url.Scheme]
 	}
 	return fmt.Sprintf("%s:%s", host, port)
+}
+
+type connBodyReadCloser struct {
+	io.ReadCloser
+	conn net.Conn
+}
+
+func (b *connBodyReadCloser) Close() error {
+	b.conn.Close()
+	return b.ReadCloser.Close()
+}
+
+// wrap the conn with the body so that when the body is closed the conn is closed
+func wrapConnBody(conn net.Conn, res *http.Response) (*http.Response, error) {
+	res.Body = &connBodyReadCloser{
+		ReadCloser: res.Body,
+		conn:       conn,
+	}
+	return res, nil
 }
