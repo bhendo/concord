@@ -103,7 +103,6 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
 	if proxy != nil {
 		switch req.URL.Scheme {
